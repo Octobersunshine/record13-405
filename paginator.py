@@ -1,5 +1,5 @@
 import pandas as pd
-from typing import Any, Optional, Dict, Tuple
+from typing import Any, Optional, Dict
 
 
 class PageResult:
@@ -16,6 +16,9 @@ class PageResult:
         prev_cursor: Optional[Any] = None,
         cursor: Optional[Any] = None,
         limit: Optional[int] = None,
+        last_seen_value: Optional[Any] = None,
+        first_seen_value: Optional[Any] = None,
+        safe_mode: bool = False,
     ):
         self.data = data
         self.total = total
@@ -28,6 +31,9 @@ class PageResult:
         self.prev_cursor = prev_cursor
         self.cursor = cursor
         self.limit = limit
+        self.last_seen_value = last_seen_value
+        self.first_seen_value = first_seen_value
+        self.safe_mode = safe_mode
 
     def to_dict(self) -> Dict[str, Any]:
         result = {
@@ -40,6 +46,10 @@ class PageResult:
             result["page"] = self.page
             result["page_size"] = self.page_size
             result["total_pages"] = self.total_pages
+        if self.safe_mode:
+            result["safe_mode"] = True
+            result["last_seen_value"] = self.last_seen_value
+            result["first_seen_value"] = self.first_seen_value
         if self.cursor is not None or self.next_cursor is not None:
             result["cursor"] = self.cursor
             result["limit"] = self.limit
@@ -49,6 +59,8 @@ class PageResult:
 
     def __repr__(self) -> str:
         mode = "page" if self.page is not None else "cursor"
+        if self.safe_mode:
+            mode = "safe_page"
         return f"PageResult(mode={mode}, total={self.total}, rows={len(self.data)})"
 
 
@@ -65,11 +77,17 @@ class DataFramePaginator:
         page_size: int = 10,
         sort_by: Optional[str] = None,
         ascending: bool = True,
+        safe_mode: bool = False,
+        last_seen_value: Optional[Any] = None,
+        first_seen_value: Optional[Any] = None,
+        direction: str = "next",
     ) -> PageResult:
         if page < 1:
             raise ValueError("page must be >= 1")
         if page_size < 1:
             raise ValueError("page_size must be >= 1")
+        if direction not in ("next", "prev"):
+            raise ValueError("direction must be 'next' or 'prev'")
 
         df = self.df.copy()
 
@@ -79,9 +97,25 @@ class DataFramePaginator:
         total = len(df)
         total_pages = (total + page_size - 1) // page_size if total > 0 else 0
 
+        if safe_mode:
+            if sort_by is None:
+                raise ValueError("sort_by is required for safe_mode pagination")
+
+            return self._paginate_by_page_safe(
+                df=df,
+                page=page,
+                page_size=page_size,
+                sort_by=sort_by,
+                ascending=ascending,
+                total=total,
+                total_pages=total_pages,
+                last_seen_value=last_seen_value,
+                first_seen_value=first_seen_value,
+                direction=direction,
+            )
+
         start = (page - 1) * page_size
         end = start + page_size
-
         page_data = df.iloc[start:end].copy()
 
         has_next = page < total_pages
@@ -95,6 +129,73 @@ class DataFramePaginator:
             total_pages=total_pages,
             has_next=has_next,
             has_prev=has_prev,
+        )
+
+    def _paginate_by_page_safe(
+        self,
+        df: pd.DataFrame,
+        page: int,
+        page_size: int,
+        sort_by: str,
+        ascending: bool,
+        total: int,
+        total_pages: int,
+        last_seen_value: Optional[Any],
+        first_seen_value: Optional[Any],
+        direction: str,
+    ) -> PageResult:
+        if direction == "next":
+            if last_seen_value is not None:
+                if ascending:
+                    mask = df[sort_by] > last_seen_value
+                else:
+                    mask = df[sort_by] < last_seen_value
+                filtered = df[mask]
+                page_data = filtered.head(page_size).copy()
+
+                has_next = len(filtered) > page_size
+                has_prev = True
+            else:
+                filtered = df
+                page_data = df.head(page_size).copy()
+
+                has_next = len(df) > page_size
+                has_prev = False
+
+            current_last_seen = self._get_last_value(page_data, sort_by) if has_next else None
+            current_first_seen = self._get_first_value(page_data, sort_by)
+        else:
+            if first_seen_value is not None:
+                if ascending:
+                    mask = df[sort_by] < first_seen_value
+                else:
+                    mask = df[sort_by] > first_seen_value
+                filtered = df[mask]
+                page_data = filtered.tail(page_size).copy()
+
+                has_next = True
+                has_prev = len(filtered) > page_size
+            else:
+                filtered = df
+                page_data = df.tail(page_size).copy()
+
+                has_next = False
+                has_prev = len(df) > page_size
+
+            current_last_seen = self._get_last_value(page_data, sort_by)
+            current_first_seen = self._get_first_value(page_data, sort_by) if has_prev else None
+
+        return PageResult(
+            data=page_data,
+            total=total,
+            page=page,
+            page_size=page_size,
+            total_pages=total_pages,
+            has_next=has_next,
+            has_prev=has_prev,
+            last_seen_value=current_last_seen,
+            first_seen_value=current_first_seen,
+            safe_mode=True,
         )
 
     def paginate_by_cursor(
@@ -188,6 +289,9 @@ class DataFramePaginator:
         sort_by: Optional[str] = None,
         ascending: bool = True,
         direction: str = "next",
+        safe_mode: bool = False,
+        last_seen_value: Optional[Any] = None,
+        first_seen_value: Optional[Any] = None,
     ) -> PageResult:
         if mode == "page":
             return self.paginate_by_page(
@@ -195,6 +299,10 @@ class DataFramePaginator:
                 page_size=page_size,
                 sort_by=sort_by,
                 ascending=ascending,
+                safe_mode=safe_mode,
+                last_seen_value=last_seen_value,
+                first_seen_value=first_seen_value,
+                direction=direction,
             )
         elif mode == "cursor":
             if sort_by is None:

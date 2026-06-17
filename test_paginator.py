@@ -330,5 +330,215 @@ class TestCursorPaginationNavigation(unittest.TestCase):
         self.assertEqual(all_ids, list(range(1, 31)))
 
 
+class TestSafePagePagination(unittest.TestCase):
+    def setUp(self):
+        self.df = pd.DataFrame({"id": range(1, 31)})
+        self.paginator = DataFramePaginator(self.df)
+
+    def test_safe_mode_requires_sort_by(self):
+        with self.assertRaises(ValueError):
+            self.paginator.paginate_by_page(
+                page=1, page_size=10, safe_mode=True
+            )
+
+    def test_safe_first_page(self):
+        result = self.paginator.paginate_by_page(
+            page=1, page_size=10, sort_by="id", safe_mode=True
+        )
+        self.assertTrue(result.safe_mode)
+        self.assertEqual(len(result.data), 10)
+        self.assertEqual(result.data["id"].iloc[0], 1)
+        self.assertEqual(result.data["id"].iloc[-1], 10)
+        self.assertEqual(result.first_seen_value, 1)
+        self.assertEqual(result.last_seen_value, 10)
+        self.assertTrue(result.has_next)
+        self.assertFalse(result.has_prev)
+
+    def test_safe_next_page_with_last_seen(self):
+        result1 = self.paginator.paginate_by_page(
+            page=1, page_size=10, sort_by="id", safe_mode=True
+        )
+        result2 = self.paginator.paginate_by_page(
+            page=2, page_size=10, sort_by="id",
+            safe_mode=True, last_seen_value=result1.last_seen_value, direction="next"
+        )
+        self.assertEqual(len(result2.data), 10)
+        self.assertEqual(result2.data["id"].iloc[0], 11)
+        self.assertEqual(result2.data["id"].iloc[-1], 20)
+        self.assertEqual(result2.first_seen_value, 11)
+        self.assertEqual(result2.last_seen_value, 20)
+        self.assertTrue(result2.has_next)
+        self.assertTrue(result2.has_prev)
+
+    def test_safe_prev_page_with_first_seen(self):
+        result1 = self.paginator.paginate_by_page(
+            page=1, page_size=10, sort_by="id", safe_mode=True
+        )
+        result2 = self.paginator.paginate_by_page(
+            page=2, page_size=10, sort_by="id",
+            safe_mode=True, last_seen_value=result1.last_seen_value, direction="next"
+        )
+        result3 = self.paginator.paginate_by_page(
+            page=1, page_size=10, sort_by="id",
+            safe_mode=True, first_seen_value=result2.first_seen_value, direction="prev"
+        )
+        self.assertEqual(len(result3.data), 10)
+        self.assertEqual(result3.data["id"].iloc[0], 1)
+        self.assertEqual(result3.data["id"].iloc[-1], 10)
+        self.assertFalse(result3.has_prev)
+
+    def test_safe_last_page(self):
+        result = self.paginator.paginate_by_page(
+            page=3, page_size=10, sort_by="id",
+            safe_mode=True, last_seen_value=20, direction="next"
+        )
+        self.assertEqual(len(result.data), 10)
+        self.assertEqual(result.data["id"].iloc[0], 21)
+        self.assertEqual(result.data["id"].iloc[-1], 30)
+        self.assertFalse(result.has_next)
+        self.assertIsNone(result.last_seen_value)
+
+    def test_safe_traverse_all_pages_forward(self):
+        all_ids = []
+        last_seen = None
+        page = 1
+        while True:
+            result = self.paginator.paginate_by_page(
+                page=page, page_size=10, sort_by="id",
+                safe_mode=True, last_seen_value=last_seen, direction="next"
+            )
+            all_ids.extend(result.data["id"].tolist())
+            if not result.has_next:
+                break
+            last_seen = result.last_seen_value
+            page += 1
+        self.assertEqual(all_ids, list(range(1, 31)))
+
+    def test_safe_mode_dict_output(self):
+        result = self.paginator.paginate_by_page(
+            page=1, page_size=5, sort_by="id", safe_mode=True
+        )
+        d = result.to_dict()
+        self.assertTrue(d["safe_mode"])
+        self.assertEqual(d["last_seen_value"], 5)
+        self.assertEqual(d["first_seen_value"], 1)
+
+
+class TestDataMutationBugFix(unittest.TestCase):
+    def test_normal_pagination_skips_on_delete(self):
+        df = pd.DataFrame({"id": range(1, 21)})
+        paginator = DataFramePaginator(df)
+
+        page1 = paginator.paginate_by_page(page=1, page_size=5, sort_by="id")
+        self.assertEqual(page1.data["id"].tolist(), [1, 2, 3, 4, 5])
+
+        df_after_delete = df[df["id"] != 3].reset_index(drop=True)
+        paginator2 = DataFramePaginator(df_after_delete)
+
+        page2 = paginator2.paginate_by_page(page=2, page_size=5, sort_by="id")
+        self.assertNotIn(3, page2.data["id"].tolist())
+        self.assertEqual(page2.data["id"].tolist(), [7, 8, 9, 10, 11])
+        self.assertNotIn(6, page2.data["id"].tolist())
+
+    def test_safe_pagination_no_skip_on_delete(self):
+        df = pd.DataFrame({"id": range(1, 21)})
+        paginator = DataFramePaginator(df)
+
+        page1 = paginator.paginate_by_page(
+            page=1, page_size=5, sort_by="id", safe_mode=True
+        )
+        self.assertEqual(page1.data["id"].tolist(), [1, 2, 3, 4, 5])
+
+        df_after_delete = df[df["id"] != 3].reset_index(drop=True)
+        paginator2 = DataFramePaginator(df_after_delete)
+
+        page2 = paginator2.paginate_by_page(
+            page=2, page_size=5, sort_by="id",
+            safe_mode=True, last_seen_value=page1.last_seen_value, direction="next"
+        )
+        self.assertEqual(page2.data["id"].tolist(), [6, 7, 8, 9, 10])
+        self.assertNotIn(3, page2.data["id"].tolist())
+        self.assertIn(6, page2.data["id"].tolist())
+
+    def test_normal_pagination_duplicates_on_insert(self):
+        df = pd.DataFrame({"id": [1, 2, 4, 5, 6, 7, 8, 9, 10]})
+        paginator = DataFramePaginator(df)
+
+        page1 = paginator.paginate_by_page(page=1, page_size=5, sort_by="id")
+        self.assertEqual(page1.data["id"].tolist(), [1, 2, 4, 5, 6])
+
+        df_after_insert = pd.concat([
+            pd.DataFrame({"id": [3]}),
+            df
+        ]).sort_values("id").reset_index(drop=True)
+        paginator2 = DataFramePaginator(df_after_insert)
+
+        page2 = paginator2.paginate_by_page(page=2, page_size=5, sort_by="id")
+        self.assertEqual(page2.data["id"].tolist(), [6, 7, 8, 9, 10])
+        self.assertIn(6, page1.data["id"].tolist())
+        self.assertIn(6, page2.data["id"].tolist())
+
+    def test_safe_pagination_no_duplicate_on_insert(self):
+        df = pd.DataFrame({"id": [1, 2, 4, 5, 6, 7, 8, 9, 10]})
+        paginator = DataFramePaginator(df)
+
+        page1 = paginator.paginate_by_page(
+            page=1, page_size=5, sort_by="id", safe_mode=True
+        )
+        self.assertEqual(page1.data["id"].tolist(), [1, 2, 4, 5, 6])
+
+        df_after_insert = pd.concat([
+            pd.DataFrame({"id": [3]}),
+            df
+        ]).sort_values("id").reset_index(drop=True)
+        paginator2 = DataFramePaginator(df_after_insert)
+
+        page2 = paginator2.paginate_by_page(
+            page=2, page_size=5, sort_by="id",
+            safe_mode=True, last_seen_value=page1.last_seen_value, direction="next"
+        )
+        self.assertEqual(page2.data["id"].tolist(), [7, 8, 9, 10])
+        self.assertIn(6, page1.data["id"].tolist())
+        self.assertNotIn(6, page2.data["id"].tolist())
+
+    def test_safe_pagination_descending_on_delete(self):
+        df = pd.DataFrame({"id": range(1, 21)})
+        paginator = DataFramePaginator(df)
+
+        page1 = paginator.paginate_by_page(
+            page=1, page_size=5, sort_by="id", ascending=False, safe_mode=True
+        )
+        self.assertEqual(page1.data["id"].tolist(), [20, 19, 18, 17, 16])
+
+        df_after_delete = df[df["id"] != 18].reset_index(drop=True)
+        paginator2 = DataFramePaginator(df_after_delete)
+
+        page2 = paginator2.paginate_by_page(
+            page=2, page_size=5, sort_by="id",
+            ascending=False, safe_mode=True,
+            last_seen_value=page1.last_seen_value, direction="next"
+        )
+        self.assertEqual(page2.data["id"].tolist(), [15, 14, 13, 12, 11])
+        self.assertNotIn(18, page2.data["id"].tolist())
+        self.assertIn(15, page2.data["id"].tolist())
+
+    def test_cursor_pagination_no_skip_on_delete(self):
+        df = pd.DataFrame({"id": range(1, 21)})
+        paginator = DataFramePaginator(df)
+
+        page1 = paginator.paginate_by_cursor(cursor=None, limit=5, sort_by="id")
+        self.assertEqual(page1.data["id"].tolist(), [1, 2, 3, 4, 5])
+
+        df_after_delete = df[df["id"] != 3].reset_index(drop=True)
+        paginator2 = DataFramePaginator(df_after_delete)
+
+        page2 = paginator2.paginate_by_cursor(
+            cursor=page1.next_cursor, limit=5, sort_by="id", direction="next"
+        )
+        self.assertEqual(page2.data["id"].tolist(), [6, 7, 8, 9, 10])
+        self.assertNotIn(3, page2.data["id"].tolist())
+        self.assertIn(6, page2.data["id"].tolist())
+
+
 if __name__ == "__main__":
     unittest.main()

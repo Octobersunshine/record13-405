@@ -179,3 +179,55 @@ if __name__ == "__main__":
     demo_cursor_pagination()
     demo_unified_api()
     demo_large_dataset()
+
+    print("\n" + "=" * 60)
+    print(" 数据变动场景对比演示")
+    print("=" * 60)
+
+    df = pd.DataFrame({"id": range(1, 21), "name": [f"user_{i}" for i in range(1, 21)]})
+    paginator = DataFramePaginator(df)
+
+    print("\n--- 初始数据: ID 1-20 ---")
+    print(f"第 1 页请求 (page=1, page_size=5)...")
+    page1_normal = paginator.paginate_by_page(page=1, page_size=5, sort_by="id")
+    page1_safe = paginator.paginate_by_page(page=1, page_size=5, sort_by="id", safe_mode=True)
+    print(f"普通模式第 1 页 ID: {page1_normal.data['id'].tolist()}")
+    print(f"安全模式第 1 页 ID: {page1_safe.data['id'].tolist()}")
+
+    print("\n--- 数据变动: 删除 ID=3 ---")
+    df_after = df[df["id"] != 3].reset_index(drop=True)
+    paginator_after = DataFramePaginator(df_after)
+
+    print("\n--- 请求第 2 页 ---")
+    page2_normal = paginator_after.paginate_by_page(page=2, page_size=5, sort_by="id")
+    page2_safe = paginator_after.paginate_by_page(
+        page=2, page_size=5, sort_by="id",
+        safe_mode=True, last_seen_value=page1_safe.last_seen_value, direction="next"
+    )
+
+    print(f"普通模式第 2 页 ID: {page2_normal.data['id'].tolist()}")
+    print(f"  ❌ 问题: ID=6 被遗漏了! (因为删除导致偏移错误)")
+    print(f"安全模式第 2 页 ID: {page2_safe.data['id'].tolist()}")
+    print(f"  ✅ 正确: 从 ID=6 开始，基于 last_seen_value=5 定位")
+
+    print("\n--- 使用游标分页也可以解决 ---")
+    cursor_page1 = paginator.paginate_by_cursor(cursor=None, limit=5, sort_by="id")
+    cursor_page2 = paginator_after.paginate_by_cursor(
+        cursor=cursor_page1.next_cursor, limit=5, sort_by="id", direction="next"
+    )
+    print(f"游标模式第 2 页 ID: {cursor_page2.data['id'].tolist()}")
+    print(f"  ✅ 正确: 基于 cursor=5 定位")
+
+    print("\n" + "=" * 60)
+    print(" 建议")
+    print("=" * 60)
+    print("""
+  📌 数据频繁变动场景，推荐使用:
+     1. 游标分页 (cursor/limit) - 最可靠
+     2. 安全跳页 (safe_mode=True) - 保留 page 语义
+
+  ⚠️  普通跳页 (page/pageSize) 仅适用于:
+     - 数据相对静态
+     - 需要随机跳页访问
+     - 可容忍少量重复/遗漏
+    """)
