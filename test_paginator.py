@@ -165,7 +165,7 @@ class TestPaginateByCursor(unittest.TestCase):
         self.paginator = DataFramePaginator(self.df)
 
     def test_first_page_no_cursor(self):
-        result = self.paginator.paginate_by_cursor(cursor=None, limit=10, sort_by="id")
+        result = self.paginator.paginate_by_cursor(cursor=None, limit=10, sort_by="id", count_total=True)
         self.assertEqual(len(result.data), 10)
         self.assertIsNone(result.cursor)
         self.assertEqual(result.total, 100)
@@ -245,7 +245,7 @@ class TestPaginateByCursor(unittest.TestCase):
     def test_empty_dataframe(self):
         df = pd.DataFrame({"id": [], "value": []})
         paginator = DataFramePaginator(df)
-        result = paginator.paginate_by_cursor(cursor=None, limit=10, sort_by="id")
+        result = paginator.paginate_by_cursor(cursor=None, limit=10, sort_by="id", count_total=True)
         self.assertEqual(result.total, 0)
         self.assertEqual(len(result.data), 0)
         self.assertFalse(result.has_next)
@@ -538,6 +538,135 @@ class TestDataMutationBugFix(unittest.TestCase):
         self.assertEqual(page2.data["id"].tolist(), [6, 7, 8, 9, 10])
         self.assertNotIn(3, page2.data["id"].tolist())
         self.assertIn(6, page2.data["id"].tolist())
+
+
+class TestCountTotal(unittest.TestCase):
+    def setUp(self):
+        self.df = pd.DataFrame({"id": range(1, 101)})
+        self.paginator = DataFramePaginator(self.df)
+
+    def test_page_mode_always_returns_total(self):
+        result = self.paginator.paginate_by_page(page=1, page_size=10, sort_by="id")
+        self.assertIsNotNone(result.total)
+        self.assertEqual(result.total, 100)
+
+    def test_page_safe_mode_always_returns_total(self):
+        result = self.paginator.paginate_by_page(
+            page=1, page_size=10, sort_by="id", safe_mode=True
+        )
+        self.assertIsNotNone(result.total)
+        self.assertEqual(result.total, 100)
+
+    def test_cursor_default_no_total(self):
+        result = self.paginator.paginate_by_cursor(cursor=None, limit=10, sort_by="id")
+        self.assertIsNone(result.total)
+
+    def test_cursor_count_total_true(self):
+        result = self.paginator.paginate_by_cursor(
+            cursor=None, limit=10, sort_by="id", count_total=True
+        )
+        self.assertIsNotNone(result.total)
+        self.assertEqual(result.total, 100)
+
+    def test_cursor_count_total_false_explicit(self):
+        result = self.paginator.paginate_by_cursor(
+            cursor=None, limit=10, sort_by="id", count_total=False
+        )
+        self.assertIsNone(result.total)
+
+    def test_cursor_count_total_with_next_page(self):
+        result = self.paginator.paginate_by_cursor(
+            cursor=None, limit=10, sort_by="id", count_total=True
+        )
+        self.assertEqual(result.total, 100)
+
+        result2 = self.paginator.paginate_by_cursor(
+            cursor=result.next_cursor, limit=10, sort_by="id",
+            direction="next", count_total=True
+        )
+        self.assertEqual(result2.total, 100)
+
+    def test_cursor_count_total_with_prev_page(self):
+        result = self.paginator.paginate_by_cursor(
+            cursor=11, limit=10, sort_by="id",
+            direction="prev", count_total=True
+        )
+        self.assertEqual(result.total, 100)
+
+    def test_cursor_count_total_dict_output(self):
+        result = self.paginator.paginate_by_cursor(
+            cursor=None, limit=10, sort_by="id", count_total=True
+        )
+        d = result.to_dict()
+        self.assertIn("total", d)
+        self.assertEqual(d["total"], 100)
+
+    def test_cursor_no_count_total_dict_output(self):
+        result = self.paginator.paginate_by_cursor(
+            cursor=None, limit=10, sort_by="id", count_total=False
+        )
+        d = result.to_dict()
+        self.assertNotIn("total", d)
+
+    def test_page_mode_dict_always_has_total(self):
+        result = self.paginator.paginate_by_page(page=1, page_size=10, sort_by="id")
+        d = result.to_dict()
+        self.assertIn("total", d)
+        self.assertEqual(d["total"], 100)
+
+    def test_unified_paginate_cursor_count_total(self):
+        result = self.paginator.paginate(
+            mode="cursor", limit=10, sort_by="id", count_total=True
+        )
+        self.assertEqual(result.total, 100)
+
+    def test_unified_paginate_cursor_no_count_total(self):
+        result = self.paginator.paginate(
+            mode="cursor", limit=10, sort_by="id", count_total=False
+        )
+        self.assertIsNone(result.total)
+
+    def test_unified_paginate_page_ignores_count_total(self):
+        result = self.paginator.paginate(
+            mode="page", page=1, page_size=10, sort_by="id", count_total=False
+        )
+        self.assertIsNotNone(result.total)
+        self.assertEqual(result.total, 100)
+
+    def test_cursor_count_total_descending(self):
+        result = self.paginator.paginate_by_cursor(
+            cursor=None, limit=10, sort_by="id",
+            ascending=False, count_total=True
+        )
+        self.assertEqual(result.total, 100)
+
+    def test_repr_with_no_total(self):
+        result = self.paginator.paginate_by_cursor(
+            cursor=None, limit=10, sort_by="id", count_total=False
+        )
+        self.assertIn("N/A", repr(result))
+
+    def test_repr_with_total(self):
+        result = self.paginator.paginate_by_cursor(
+            cursor=None, limit=10, sort_by="id", count_total=True
+        )
+        self.assertIn("100", repr(result))
+
+    def test_empty_dataframe_cursor_count_total(self):
+        df = pd.DataFrame({"id": []})
+        paginator = DataFramePaginator(df)
+        result = paginator.paginate_by_cursor(
+            cursor=None, limit=10, sort_by="id", count_total=True
+        )
+        self.assertEqual(result.total, 0)
+
+    def test_empty_dataframe_cursor_no_count_total(self):
+        df = pd.DataFrame({"id": []})
+        paginator = DataFramePaginator(df)
+        result = paginator.paginate_by_cursor(
+            cursor=None, limit=10, sort_by="id", count_total=False
+        )
+        self.assertIsNone(result.total)
 
 
 if __name__ == "__main__":

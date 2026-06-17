@@ -6,7 +6,7 @@ class PageResult:
     def __init__(
         self,
         data: pd.DataFrame,
-        total: int,
+        total: Optional[int] = None,
         page: Optional[int] = None,
         page_size: Optional[int] = None,
         total_pages: Optional[int] = None,
@@ -36,12 +36,13 @@ class PageResult:
         self.safe_mode = safe_mode
 
     def to_dict(self) -> Dict[str, Any]:
-        result = {
+        result: Dict[str, Any] = {
             "data": self.data.to_dict(orient="records"),
-            "total": self.total,
             "has_next": self.has_next,
             "has_prev": self.has_prev,
         }
+        if self.total is not None:
+            result["total"] = self.total
         if self.page is not None:
             result["page"] = self.page
             result["page_size"] = self.page_size
@@ -61,7 +62,8 @@ class PageResult:
         mode = "page" if self.page is not None else "cursor"
         if self.safe_mode:
             mode = "safe_page"
-        return f"PageResult(mode={mode}, total={self.total}, rows={len(self.data)})"
+        total_str = str(self.total) if self.total is not None else "N/A"
+        return f"PageResult(mode={mode}, total={total_str}, rows={len(self.data)})"
 
 
 class DataFramePaginator:
@@ -205,6 +207,7 @@ class DataFramePaginator:
         sort_by: str = "id",
         ascending: bool = True,
         direction: str = "next",
+        count_total: bool = False,
     ) -> PageResult:
         if limit < 1:
             raise ValueError("limit must be >= 1")
@@ -216,7 +219,7 @@ class DataFramePaginator:
         df = self.df.copy()
         df = df.sort_values(by=sort_by, ascending=ascending)
 
-        total = len(df)
+        total = len(df) if count_total else None
 
         if cursor is None:
             page_data = df.head(limit).copy()
@@ -292,6 +295,7 @@ class DataFramePaginator:
         safe_mode: bool = False,
         last_seen_value: Optional[Any] = None,
         first_seen_value: Optional[Any] = None,
+        count_total: bool = True,
     ) -> PageResult:
         if mode == "page":
             return self.paginate_by_page(
@@ -313,6 +317,7 @@ class DataFramePaginator:
                 sort_by=sort_by,
                 ascending=ascending,
                 direction=direction,
+                count_total=count_total,
             )
         else:
             raise ValueError(f"Unknown pagination mode: {mode}. Use 'page' or 'cursor'.")
